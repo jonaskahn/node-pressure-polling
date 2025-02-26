@@ -17,17 +17,17 @@ setInterval(() => {
 }, 1000);
 
 // Simulate a Redis lookup (takes 5ms)
-const simulateRedisLookup = () => {
-  const start = process.hrtime.bigint();
-  // Simulate CPU work with a busy wait
-  while (Number(process.hrtime.bigint() - start) / 1000000 < 5) {
-    // Busy wait to simulate CPU work
-  }
-  return { value: currentValue, timestamp: Date.now() };
+const simulateRedisLookup = async () => {
+  // Use promises instead of blocking the event loop
+  return new Promise(resolve => {
+    setTimeout(() => {
+      resolve({ value: currentValue, timestamp: Date.now() });
+    }, 5); // 5ms delay to simulate the database lookup
+  });
 };
 
 // Middleware to log requests
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   const requestId = Date.now() + Math.random().toString(36).substring(2, 9);
   const requestTime = new Date().toISOString();
   console.log(`[${requestTime}] Request received: ${requestId} - ${req.url}`);
@@ -38,7 +38,7 @@ app.use((req, res, next) => {
 });
 
 // Metrics endpoint
-app.get("/metrics", (req, res) => {
+app.get("/metrics", async (req, res) => {
   res.json({
     cpuUsage: process.cpuUsage(),
     activeRequests: server._connections,
@@ -48,26 +48,26 @@ app.get("/metrics", (req, res) => {
 });
 
 // Polling endpoint
-app.get("/poll", (req, res) => {
-  const data = simulateRedisLookup();
+app.get("/poll", async (req, res) => {
   const requestId = req.requestId;
+  const data = await simulateRedisLookup();
 
-  // Add artificial delay to handle request (mimics actual work)
-  setTimeout(() => {
-    res.json({
-      data,
-      server_processed_at: new Date().toISOString(),
-      request_id: requestId,
-    });
+  // Using a promise for the artificial delay
+  await new Promise(resolve => setTimeout(resolve, 20));
 
-    console.log(
-      `[${new Date().toISOString()}] Request completed: ${requestId}`,
-    );
-  }, 20); // 20ms processing time
+  res.json({
+    data,
+    server_processed_at: new Date().toISOString(),
+    request_id: requestId,
+  });
+
+  console.log(
+    `[${new Date().toISOString()}] Request completed: ${requestId}`,
+  );
 });
 
 // SSE endpoint
-app.get("/sse", (req, res) => {
+app.get("/sse", async (req, res) => {
   const requestId = req.requestId;
   
   res.setHeader('Content-Type', 'text/event-stream');
@@ -75,7 +75,7 @@ app.get("/sse", (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   
   // Send initial data
-  const data = simulateRedisLookup();
+  const data = await simulateRedisLookup();
   res.write(
     `data: ${JSON.stringify({
       data,
@@ -121,7 +121,6 @@ app.get("/", (req, res) => {
         .response-time { font-weight: bold; }
         button { margin: 5px; padding: 8px; }
         
-        /* Add these styles to your existing CSS */
         .scroll-container {
           height: 300px;
           overflow-y: auto;
@@ -178,7 +177,6 @@ app.get("/", (req, res) => {
           border-bottom: 1px solid white;
         }
         
-        /* Define color indicators for response time */
         .time-fast {
           color: green;
         }
@@ -189,6 +187,41 @@ app.get("/", (req, res) => {
         
         .time-slow {
           color: red;
+        }
+        
+        /* Metrics styling */
+        .metrics-table {
+          width: 100%;
+          border-collapse: collapse;
+          margin-top: 10px;
+        }
+        
+        .metrics-table th, .metrics-table td {
+          text-align: left;
+          padding: 8px;
+          border-bottom: 1px solid #ddd;
+        }
+        
+        .metrics-table th {
+          background-color: #f8f8f8;
+        }
+        
+        .metrics-header {
+          font-weight: bold;
+          font-size: 1.1em;
+          margin-top: 15px;
+          margin-bottom: 5px;
+        }
+        
+        .metrics-description {
+          color: #666;
+          font-style: italic;
+          font-size: 0.9em;
+        }
+        
+        .metrics-value {
+          font-family: monospace;
+          font-weight: bold;
         }
       </style>
     </head>
@@ -230,7 +263,7 @@ app.get("/", (req, res) => {
         
         <div class="metrics">
           <h3>Server Metrics</h3>
-          <pre id="server-metrics">Loading...</pre>
+          <div id="formatted-metrics">Loading metrics...</div>
         </div>
       </div>
       
@@ -265,14 +298,127 @@ app.get("/", (req, res) => {
         let pollTimes = [];
         let sseCount = 0;
         
-        // Update metrics regularly
+        // Metric descriptions
+        const metricDescriptions = {
+          cpuUsage: {
+            title: "CPU Usage",
+            description: "Cumulative amount of CPU time used by the Node.js process",
+            fields: {
+              user: "Time spent executing JavaScript code (microseconds)",
+              system: "Time spent in system operations like I/O (microseconds)"
+            }
+          },
+          activeRequests: {
+            title: "Active Connections",
+            description: "Current number of active HTTP connections to the server"
+          },
+          memoryUsage: {
+            title: "Memory Usage",
+            description: "Memory consumption of the Node.js process",
+            fields: {
+              rss: "Resident Set Size - total memory allocated (bytes)",
+              heapTotal: "Total size of allocated JavaScript heap (bytes)",
+              heapUsed: "Actually used JavaScript heap memory (bytes)",
+              external: "Memory used by C++ objects bound to JavaScript (bytes)",
+              arrayBuffers: "Memory used for ArrayBuffers and SharedArrayBuffers (bytes)"
+            }
+          },
+          currentValue: {
+            title: "Update Counter",
+            description: "Simple counter incremented each second to simulate updates"
+          }
+        };
+        
+        // Format bytes to human-readable
+        function formatBytes(bytes, decimals = 2) {
+          if (bytes === 0) return '0 Bytes';
+          
+          const k = 1024;
+          const dm = decimals < 0 ? 0 : decimals;
+          const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+          
+          const i = Math.floor(Math.log(bytes) / Math.log(k));
+          
+          return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+        }
+        
+        // Format microseconds in a human-readable way
+        function formatMicroseconds(microseconds) {
+          if (microseconds < 1000) {
+            return microseconds + ' μs';
+          } else if (microseconds < 1000000) {
+            return (microseconds / 1000).toFixed(2) + ' ms';
+          } else {
+            return (microseconds / 1000000).toFixed(2) + ' s';
+          }
+        }
+        
+        // Update metrics with formatted display and descriptions
         function updateMetrics() {
           fetch('/metrics')
             .then(response => response.json())
             .then(data => {
-              document.getElementById('server-metrics').textContent = JSON.stringify(data, null, 2);
+              const metricsContainer = document.getElementById('formatted-metrics');
+              let html = '';
+              
+              // Process each top-level metric
+              for (const [key, value] of Object.entries(data)) {
+                const metricInfo = metricDescriptions[key] || { title: key, description: "" };
+                
+                html += \`<div class="metrics-header">\${metricInfo.title}</div>\`;
+                if (metricInfo.description) {
+                  html += \`<div class="metrics-description">\${metricInfo.description}</div>\`;
+                }
+                
+                // Handle different types of metrics
+                if (key === 'cpuUsage') {
+                  html += \`<table class="metrics-table">
+                    <tr>
+                      <th>Metric</th>
+                      <th>Value</th>
+                      <th>Description</th>
+                    </tr>
+                    <tr>
+                      <td>User CPU</td>
+                      <td class="metrics-value">\${formatMicroseconds(value.user)}</td>
+                      <td>\${metricInfo.fields?.user || ""}</td>
+                    </tr>
+                    <tr>
+                      <td>System CPU</td>
+                      <td class="metrics-value">\${formatMicroseconds(value.system)}</td>
+                      <td>\${metricInfo.fields?.system || ""}</td>
+                    </tr>
+                  </table>\`;
+                } else if (key === 'memoryUsage') {
+                  html += \`<table class="metrics-table">
+                    <tr>
+                      <th>Metric</th>
+                      <th>Value</th>
+                      <th>Description</th>
+                    </tr>\`;
+                  
+                  for (const [memKey, memValue] of Object.entries(value)) {
+                    html += \`<tr>
+                      <td>\${memKey}</td>
+                      <td class="metrics-value">\${formatBytes(memValue)}</td>
+                      <td>\${metricInfo.fields?.[memKey] || ""}</td>
+                    </tr>\`;
+                  }
+                  
+                  html += \`</table>\`;
+                } else if (key === 'activeRequests') {
+                  html += \`<div class="metrics-value">\${value} connections</div>\`;
+                } else {
+                  html += \`<div class="metrics-value">\${value}</div>\`;
+                }
+              }
+              
+              metricsContainer.innerHTML = html;
             })
-            .catch(err => console.error('Error fetching metrics:', err));
+            .catch(err => {
+              console.error('Error fetching metrics:', err);
+              document.getElementById('formatted-metrics').textContent = 'Error loading metrics';
+            });
         }
         
         setInterval(updateMetrics, 1000);
@@ -386,7 +532,7 @@ app.get("/", (req, res) => {
           document.getElementById('start-polling').textContent = \`Start Polling Test (\${pollingInterval}ms)\`;
         });
         
-        // Replace the addBar function with this version
+        // Add a bar to the visualization
         function addBar(className, time) {
           const responseList = document.getElementById('response-list');
           const row = document.createElement('tr');
@@ -466,6 +612,9 @@ app.get("/", (req, res) => {
               });
             });
           });
+          
+          // Initialize metrics
+          updateMetrics();
         });
       </script>
     </body>
@@ -474,7 +623,7 @@ app.get("/", (req, res) => {
 });
 
 // 404 for all other routes
-app.use((req, res) => {
+app.use(async (req, res) => {
   res.status(404).send("Not found");
 });
 
